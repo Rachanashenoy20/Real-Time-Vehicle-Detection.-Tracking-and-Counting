@@ -1,0 +1,146 @@
+import numpy as np
+from ultralytics import YOLO
+import cv2
+import cvzone
+import math
+from datetime import datetime, timedelta
+from sort import *
+import pandas as pd
+
+cap = cv2.VideoCapture("part-one.dav")
+
+classNames = ['Car/Jeep/Van/MV', 'LCV/LGV/MiniBus', '2 axle', '3-axle', '4 to 6 axle', 'oversized']
+detected_categories = ['category 1', 'category 2', 'category 3', 'category 4', 'category 5', 'category 6']
+
+category_counts = {'category 1': 0,
+                   'category 2': 0,
+                   'category 3': 0,
+                   'category 4': 0,
+                   'category 5': 0,
+                   'category 6': 0
+                   }
+class_mapping = {
+    "Car/Jeep/Van/MV": "category 1",
+    "LCV/LGV/MiniBus": "category 2",
+    "2 axle": "category 3",
+    "3-axle": "category 4",
+    "4 to 6 axle": "category 5",
+    "oversized": "category 6"
+}
+
+# Define the codec and create a video writer object
+fourcc = cv2.VideoWriter_fourcc(*'XVID')
+# output_video = cv2.VideoWriter('output.avi', fourcc, 20.0, (1080, 720))
+
+def map_class_name(original_class_name):
+    return class_mapping.get(original_class_name, original_class_name)
+
+model = YOLO('best.pt')
+
+# Tracking
+tracker = Sort(max_age=10, min_hits=2, iou_threshold=0.3)
+
+# Boundary for lines (101, 128)(532, 219)
+limits = [116, 122, 530, 205]
+
+totalcount = []
+start_time = datetime.now()
+
+totalcount = []
+
+# Create a DataFrame to store counts at each 15-minute interval
+count_df = pd.DataFrame(columns=['Time'] + list(category_counts.keys()))
+count_data = []
+
+
+while True:
+    success, imag = cap.read()
+    if not success:
+        break  # Break the loop if there are no more frames
+
+    # Check if the frame is not empty before resizing
+    if imag.size != 0:
+        img = cv2.resize(imag, (1080, 720))
+        roi = img[10:350, 400:950]
+
+        results = model(roi, show=True, conf=0.35, save=True)
+
+        detection = np.empty((0, 5))
+
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0]
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                w, h = x2 - x1, y2 - y1
+                conf = math.ceil((box.conf[0] * 100)) / 100  # confidence
+                cls = int(box.cls[0])  # class name
+                classfound = classNames[cls]
+
+                if classfound == "Car/Jeep/Van/MV" or classfound == "LCV/LGV/MiniBus" or classfound == "2 axle" or \
+                        classfound == "3 axle" or classfound == "4 to 6 axle" or classfound == "oversized" and conf > 0.3:
+                    new_class_name = map_class_name(classfound)
+                    currentArray = np.array([x1, y1, x2, y2, conf])
+                    detection = np.vstack((detection, currentArray))
+
+        tracker_results = tracker.update(detection)
+
+        # Drawing the line
+        cv2.line(roi, (limits[0], limits[1]), (limits[2], limits[3]), (255, 0, 0), 3)
+
+        for res in tracker_results:
+            x1, y1, x2, y2, id = res
+            # print(res)
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            w, h = x2 - x1, y2 - y1
+            cvzone.cornerRect(roi, (x1, y1, w, h), l=9, rt=2, colorR=(255, 0, 255))
+            cvzone.putTextRect(roi, f'{new_class_name}', (max(0, x1), max(35, y1)), scale=1, thickness=1, offset=10)
+            cx, cy = x1 + w // 2, y1 + h // 2
+            cv2.circle(roi, (cx, cy), 2, (255, 0, 255), cv2.FILLED)
+
+
+
+            if limits[0] < cx < limits[2] and limits[1] - 5 < cy < limits[1] + 5:
+                if totalcount.count(id) == 0:
+                    totalcount.append(id)
+                    if new_class_name in detected_categories:
+                        category_counts[new_class_name] += 1
+                    cv2.line(roi, (limits[0], limits[1]), (limits[2], limits[3]), (0, 255, 0), 1)
+
+        current_time = datetime.now()
+        elapsed_time = current_time - start_time
+
+        if elapsed_time.total_seconds() >= 900:  # 15 minutes have passed
+            start_time = current_time  # reset start_time
+            count_row = {'Time': current_time.strftime('%Y-%m-%d %H:%M:%S')}
+            count_row.update(category_counts)
+            count_data.append(count_row)
+            category_counts = dict.fromkeys(category_counts, 0)  # reset category counts
+
+            # Save counts to a new Excel file
+            excel_file_name = f'counts_{current_time.strftime("%Y%m%d_%H%M%S")}.xlsx'
+            pd.DataFrame(count_data).to_excel(excel_file_name, index=False)
+            print(f'Counts saved to {excel_file_name}.')   
+
+        # Display the total count at the end
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_size = 1
+        font_thickness = 2
+        font_color = (200, 200, 255)
+        y_coordinate = 60
+
+        cv2.putText(img, f"Count :{len(totalcount)}", (20, 30), font, font_size, font_color, font_thickness,
+                    cv2.LINE_AA)
+        for category, count in category_counts.items():
+            text = f"{category}: {count} "
+            cv2.putText(img, text, (20, y_coordinate), font, font_size, font_color, font_thickness, cv2.LINE_AA)
+            y_coordinate += 40
+
+        cv2.imshow("Car Counter", img)
+        # output_video.write(img)  # Write each frame to the output video
+        cv2.waitKey(1)
+
+# Release the video capture and writer objects
+cap.release()
+# output_video.release()
+cv2.destroyAllWindows()
